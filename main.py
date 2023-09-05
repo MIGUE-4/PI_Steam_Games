@@ -3,148 +3,67 @@ from pydantic import BaseModel
 import ast
 import pandas as pd
 import re
-from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
 import pydantic
 
 
 app = FastAPI()
 
-with open(r'steam_games.json') as file:
-
-    data = []
-    for line in file.readlines():
-      
-      data.append(ast.literal_eval(line))
-
-data = pd.DataFrame(data)
-
+endpoint_developer = pd.read_parquet('data_games.parquet')
+data_australian_items = pd.read_parquet('user_items.parquet')
+data_australian_reviews = pd.read_parquet('users_reviews.parquet')
 
 def format_date(fecha):
     patron = r'^\d{4}-\d{2}-\d{2}$'
     
     return re.match(patron, str(fecha)) is not None
 
-data = data[data['release_date'].apply(format_date)]
-data.release_date = pd.to_datetime(data.release_date)
+endpoint_developer = endpoint_developer[endpoint_developer['release_date'].apply(format_date)]
 
-@app.get("/genero/{fecha}")
-def genero(fecha:int):
-   
-   return {'Géneros': data[data['release_date'].dt.year == fecha]['genres'].value_counts().head(5).index.tolist()}
-
-        
-
-@app.get("/juegos/{fecha}")
-def juegos(fecha:int):
-   
-   return {'Juegos':data[data['release_date'].dt.year == fecha]['title'].unique().tolist()}
+endpoint_developer['release_date'] = pd.to_datetime(endpoint_developer['release_date'], errors='coerce')
 
 
-@app.get("/specs/{fecha}")
-def specs(fecha:int):
-   
-   return {'Specs':data[data['release_date'].dt.year  == fecha].specs.value_counts().head(5).tolist()}
-
-
-@app.get("/earlyacces/{fecha}")
-def earlyacces(fecha:int):
-   
-   return {'Acceso Temprano':int(data[data['release_date'].dt.year == fecha].early_access.value_counts()[True])}
-   
-def meta_value(valor):
-    if isinstance(valor, str):
-        return None
-    else:
-        return valor
+endpoint_developer['year'] = endpoint_developer['release_date'].dt.year
+endpoint_developer['month'] = endpoint_developer['release_date'].dt.month
+endpoint_developer['day'] = endpoint_developer['release_date'].dt.day
+def games_total(id):
+    juegos_user = []
     
-data.metascore = data.metascore.apply(meta_value)
-
-@app.get("/metascore/{fecha}")
-def metascore(fecha:int):
-    return {'MetaScore':data[data['release_date'].dt.year == fecha].sort_values('metascore', ascending=False).head(5)['title'].tolist()}
-
-
-@app.get("/sentiment/{fecha}")
-def sentiment(fecha:int):
     
-    return {clave: valor for clave, valor in data[data['release_date'].dt.year == fecha]['sentiment'].value_counts().to_dict().items() if "user" not in clave or "reviews" not in clave}
+    for datos_games in data_australian_items[data_australian_items['user_id']==id]['items'][0]:
+        juegos_user.append(datos_games['item_name'])
 
-data_steam = pd.read_csv('data_steam.csv')
+    data_game_filtrado = endpoint_developer[endpoint_developer['title'].isin(juegos_user)]
 
-X = data_steam.drop(columns=['price'])
-Y = data_steam['price']
+    data_game_filtrado['pagado'] = data_game_filtrado['price']-data_game_filtrado['discount_price']
 
-X_Train, X_Test, Y_Train, Y_Test = train_test_split(X, Y, test_size = 0.25, random_state=0)
-multi_regress = LinearRegression()
-trained_regress= multi_regress.fit(X_Train, Y_Train)
+    enumerr_recommeds = []
+    for rec in data_australian_reviews[data_australian_reviews['user_id']=='evcentric'].reviews:
+        for nums in rec:
+            enumerr_recommeds.append(dict(nums).get('recommend'))
 
-Y_Pred = trained_regress.predict(X_Test)
+    return {'Suma de pagos':data_game_filtrado.pagado, 'porcentaje recomendados':(enumerr_recommeds.count(True)/len(enumerr_recommeds))*100 ,'Cantidad Items':len(juegos_user)}
 
-class Prediction(BaseModel):
-    release_date: int
-    early_access: bool
-    metascore: float
-    action: int
-    adventure: int
-    animation_modeling: int
-    audio_production: int
-    casual: int
-    design_illustration: int
-    Early_Access : int
-    education: int
-    indie: int
-    massively_multiplayer: int
-    photo_editing: int
-    rpg: int
-    racing: int
-    simulation: int
-    software_training: int
-    sports: int
-    strategy: int
-    utilities: int
-    video_production: int
-    web_publishing: int
-    captions_available: int
-    co_op: int
-    commentary_available: int
-    cross_platform_multiplayer: int
-    downloadable_content: int
-    full_controller_support: int
-    game_demo: int
-    in_app_purchases: int
-    includes_source_sdk: int
-    includes_level_editor: int
-    local_co_op: int
-    local_multi_player: int
-    mmo: int
-    multi_player: int
-    online_co_op: int
-    online_multi_player: int
-    partial_controller_support: int
-    shared_split_screen: int
-    single_player: int
-    stats: int
-    steam_achievements: int
-    steam_cloud: int
-    steam_leaderboards: int
-    steam_trading_cards: int
-    steam_turn_notifications: int
-    steam_workshop: int
-    steamvr_collectibles: int
-    valve_anti_cheat_enabled: int
+@app.get("/userdata/{User_id}")
+def genero(User_id:str):
+   
+   return games_total(User_id)
 
-@app.post("/prediction")
-def predict(Prediction:Prediction):
     
-    prediction_dict = Prediction.model_dump()
+def dev_name(developer : str):
+    
+    juegos_valor_cero = endpoint_developer[(endpoint_developer['developer'] == developer) & (endpoint_developer['price'] == 0)]
 
-    X_Train.loc[[0]] = list(prediction_dict.values())
+    agrupado = juegos_valor_cero.groupby('year')['developer'].count().reset_index(name='juegos_valor_cero')
+    total_juegos_por_anio = endpoint_developer[endpoint_developer['developer'] == developer].groupby('year')['developer'].count().reset_index(name='total_juegos')
 
-    y_pred = trained_regress.predict(X_Train.loc[[0]])
+    resultado = pd.merge(agrupado, total_juegos_por_anio, on='year')
+    resultado['Contenido Free'] = (resultado.juegos_valor_cero/resultado.total_juegos)*100
+    resultado.drop(columns=['juegos_valor_cero', 'total_juegos'], inplace=True)
 
+    return resultado.to_dict()
 
-    return {'Estimación de precio':round(y_pred[0],2), 'RMSE':mean_squared_error(Y_Test, Y_Pred, squared=False)}
-
-
+@app.get("/developer/{name}")
+def earlyacces(name:str):
+   
+   return dev_name(name)
+   
